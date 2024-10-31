@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from utils import add_feature_on_area, replace_with_feature
 import threading
+from retrieval import FeatureRetriever
 
 code_to_block = {
     "down.2.1": "unet.down_blocks.2.attentions.1",
@@ -273,11 +274,20 @@ def create_intervene_part(pipe: HookedStableDiffusionXLPipeline, saes_dict, mean
     return intervene_tab
 
 
-def create_top_images_part(demo):
-    def update_top_images(block_select, brush_index):
-        block = block_select.split(" ")[0]
-        url = f"https://huggingface.co/surokpro2/sdxl_sae_images/resolve/main/{block}/{brush_index}.jpg"
-        return url
+def create_top_images_part(retriever, demo):
+    def update_top_images(block_select, brush_index, searchbar):
+        if searchbar == "":
+            block = block_select.split(" ")[0]
+            url = f"https://huggingface.co/surokpro2/sdxl_sae_images/resolve/main/{block}/{brush_index}.jpg"
+            index = brush_index
+        else:
+            if retriever is None:
+                raise ValueError("Feature retrieval is not enabled")
+            top_indices = list(retriever.query_text(searchbar, block_select.split(" ")[0]).keys())
+            block = block_select.split(" ")[0]
+            index = int(top_indices[brush_index])
+            url = f"https://huggingface.co/surokpro2/sdxl_sae_images/resolve/main/{block}/{index}.jpg"
+        return url, index
 
     with gr.Tab("Top Images", elem_classes="tabs") as top_images_tab:
         with gr.Row():
@@ -286,13 +296,17 @@ def create_top_images_part(demo):
                 value="down.2.1 (composition)",
                 label="Select block"
             )
-            brush_index = gr.Number(value=0, label="Brush index", minimum=0, maximum=5119, precision=0)
+            brush_index = gr.Number(value=0, label="Page index", minimum=0, maximum=5119, precision=0)
+            searchbar = gr.Textbox(lines=1, label="Search", placeholder="Search for images")
+        with gr.Row():
+            display_index = gr.Label(label="Brush index", value="0")
         with gr.Row():
             image = gr.Image(width=600, height=600, label="Top Images")
 
-        block_select.select(update_top_images, [block_select, brush_index], outputs=[image])
-        brush_index.change(update_top_images, [block_select, brush_index], outputs=[image])
-        demo.load(update_top_images, [block_select, brush_index], outputs=[image])
+        block_select.select(update_top_images, [block_select, brush_index, searchbar], outputs=[image, display_index])
+        brush_index.change(update_top_images, [block_select, brush_index, searchbar], outputs=[image, display_index])
+        searchbar.change(update_top_images, [block_select, brush_index, searchbar], outputs=[image, display_index])
+        demo.load(update_top_images, [block_select, brush_index, searchbar], outputs=[image, display_index])
     return top_images_tab
 
 
@@ -329,7 +343,7 @@ def create_intro_part():
     return intro_tab
 
 
-def create_demo(pipe, saes_dict, means_dict):
+def create_demo(pipe, saes_dict, means_dict, use_retrieval=True):
     custom_css = """
     .tabs button {
         font-size: 20px !important; /* Adjust font size for tab text */
@@ -342,13 +356,17 @@ def create_demo(pipe, saes_dict, means_dict):
         margin-bottom: 20px !important;
     }
     """
-    
+    if use_retrieval:
+        retriever = FeatureRetriever()
+    else:
+        retriever = None
+
     with gr.Blocks(css=custom_css) as demo:
         with create_intro_part():
             pass
         with create_prompt_part(pipe, saes_dict, demo):
             pass
-        with create_top_images_part(demo):
+        with create_top_images_part(retriever, demo):
             pass
         with create_intervene_part(pipe, saes_dict, means_dict, demo):
             pass

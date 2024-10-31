@@ -8,3 +8,5 @@ wandb
 einops
 transformers
 accelerate
+huggingface_hub
+git+https://github.com/wendlerc/clip-retrieval.git
