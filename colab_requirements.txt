@@ -1,0 +1,8 @@
+diffusers==0.29.2
+gradio==5.23.2
+numpy
+matplotlib
+pillow
+einops
+transformers
+huggingface_hub

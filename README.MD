@@ -36,7 +36,7 @@ pip install -r requirements.txt
 
 ## Demo Application
 
-You can try our gradio demo application (`app.ipynb`) to browse and experiment with 20K+ features of our trained SAEs out-of-the-box. You can find the same notebook on [Google Colab](https://colab.research.google.com/drive/1Sd-g3w2Fwv7pc_fxgeQOR3S_RKr18qMP?usp=sharing).
+You can try our gradio demo application (`app.ipynb`) to browse and experiment with 20K+ features of our trained SAEs out-of-the-box. You can find the same notebook on [Google Colab](https://colab.research.google.com/drive/1lWZ2yCRwCf4iuykvb-91QYUNkuzIwI3k?usp=sharing).
 
 ## Usage
 
