@@ -1,5 +1,6 @@
 import torch
 from dataclasses import dataclass, field
+import os
 
 @dataclass
 class SAETrainingConfig:
@@ -21,7 +22,7 @@ class SAETrainingConfig:
     
     @property
     def save_path(self):
-        return f'/dlabscratch1/surkov/sae_models/{self.block_name}_k{self.k}_hidden{self.n_dirs}_auxk{self.auxk}_bs{self.bs}_lr{self.lr}'
+        return os.path.join(save_path_base, f'{self.block_name}_k{self.k}_hidden{self.n_dirs}_auxk{self.auxk}_bs{self.bs}_lr{self.lr}')
 
 
 @dataclass
