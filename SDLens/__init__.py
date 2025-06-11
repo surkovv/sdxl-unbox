@@ -1,1 +1,2 @@
 from .hooked_sd_pipeline import HookedIFPipeline, HookedStableDiffusionXLPipeline
+from .cache_and_edit import CachedPipeline

@@ -1,3 +1,4 @@
+from typing import Callable, List, Optional
 import torch
 
 class TimedHook:
@@ -96,6 +97,30 @@ def add_feature_on_area_turbo(sae, feature_idx, activation_map, module, input, o
     mask[..., feature_idx] = mask[..., feature_idx] = activation_map.to(mask.device)
     to_add = mask @ sae.decoder.weight.T
     return (output[0] + to_add.permute(0, 3, 1, 2).to(output[0].device),)
+
+@torch.no_grad
+def add_feature_on_area_flux(
+    sae,
+    feature_idx,
+    activation_map,
+    module,
+    input: torch.Tensor, 
+    output: torch.Tensor,
+    ):
+
+    diff = (output - input).to(sae.device)
+    activated = sae.encode(diff)
+
+    # TODO: check
+    if len(activation_map) == 2:
+        activation_map = activation_map.unsqueeze(0)
+    mask = torch.zeros_like(activated, device=diff.device)
+    activation_map = activation_map.flatten()
+    mask[..., feature_idx] = activation_map.to(mask.device)
+    to_add = mask @ sae.decoder.weight.T
+    return output + to_add.to(output.device, output.dtype)
+
+            
 
 @torch.no_grad()
 def replace_with_feature_turbo(sae, feature_idx, value, module, input, output):
