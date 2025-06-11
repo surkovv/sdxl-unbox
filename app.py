@@ -1,4 +1,5 @@
 from functools import partial
+import json
 import gradio as gr
 import os
 
@@ -702,9 +703,9 @@ if __name__ == "__main__":
     import torch
     from SDLens import HookedStableDiffusionXLPipeline
     from SAE import SparseAutoencoder
-    
+    from huggingface_hub import hf_hub_download
 
-    dtype=torch.float16
+    dtype = torch.float16
     pipe = EditedFluxPipeline.from_pretrained(
         "black-forest-labs/FLUX.1-schnell", 
         device_map="balanced",
@@ -713,41 +714,52 @@ if __name__ == "__main__":
     pipe.set_progress_bar_config(disable=True)
     pipe = CachedFLuxPipeline(pipe)
 
-
-    # Dataset and model parameters
-    DEFAULT_CUTOFF = 10000
-    NUM_TOP_IMAGES = 10
-    BATCH_ACCUM = 8             # number of mini-batches to fuse
-    NUM_NEURONS = 12288
+    # Parameters
     DEVICE = "cuda"
 
-    # Root paths (make these configurable as needed)
-    ACTIVATION_BASE_PATH = "/dlabscratch1/anmari/diffusion-interpretability/out/latents_dataset/100k_images"
-    MODEL_BASE_PATH =  "/dlabscratch1/anmari/diffusion-interpretability/out/SAE_flux_1M"
+    # Hugging Face repo setup
+    HF_REPO_ID = "antoniomari/SAE_flux_18"
+    HF_BRANCH = "main"
 
     # Command-line arguments
     block_code = "18"
-    k = 20
-
     block_name = code_to_block_flux[block_code]
-    # Dataset and checkpoint paths
-    sae_name = f"{block_name}_k{k}_hidden{NUM_NEURONS}_auxk256_bs4096_lr0.0001"
-    checkpoint_path = os.path.join(MODEL_BASE_PATH, sae_name, "final")
 
-    # ------------------------- Load Model & Data -------------------------
     saes_dict = {}
     means_dict = {}
 
-    for code, block in code_to_block_flux.items():
-        sae_name = f"{block}_k{k}_hidden{NUM_NEURONS}_auxk256_bs4096_lr0.0001"
-        checkpoint_path = os.path.join(MODEL_BASE_PATH, sae_name, "final")
-        sae = SparseAutoencoder.load_from_disk(checkpoint_path).to(DEVICE)
-        means = torch.load(
-            os.path.join(checkpoint_path, "mean.pt"),
-            weights_only=True
-        ).to(DEVICE)
-        saes_dict[code] = sae.to('cuda', dtype=dtype)
-        means_dict[code] = means.to('cuda', dtype=dtype)
+    # Download files from the root of the repo
+    state_dict_path = hf_hub_download(
+        repo_id=HF_REPO_ID,
+        filename="state_dict.pth",
+        revision=HF_BRANCH
+    )
+
+    config_path = hf_hub_download(
+        repo_id=HF_REPO_ID,
+        filename="config.json",
+        revision=HF_BRANCH
+    )
+
+    mean_path = hf_hub_download(
+        repo_id=HF_REPO_ID,
+        filename="mean.pt",
+        revision=HF_BRANCH
+    )
+
+    # Load config and model
+    with open(config_path, "r") as f:
+        config = json.load(f)
+
+    sae = SparseAutoencoder(**config)
+    checkpoint = torch.load(state_dict_path, map_location=DEVICE)
+    state_dict = checkpoint["state_dict"] 
+    sae.load_state_dict(state_dict)
+    sae = sae.to(DEVICE, dtype=torch.float16).eval()
+    means = torch.load(mean_path, map_location=DEVICE).to(dtype)
+
+    saes_dict[block_code] = sae
+    means_dict[block_code] = means
 
     demo = create_demo(pipe, saes_dict, means_dict)
     demo.launch()
