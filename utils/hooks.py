@@ -49,7 +49,7 @@ def add_feature_on_area_base_both(sae, feature_idx, activation_map, module, inpu
     mask = torch.zeros_like(activated, device=diff.device)
     if len(activation_map) == 2:
         activation_map = activation_map.unsqueeze(0)
-    mask[..., feature_idx] = mask[..., feature_idx] = activation_map.to(mask.device)
+    mask[..., feature_idx] = activation_map.to(mask.device)
     to_add = mask @ sae.decoder.weight.T
     to_add = to_add.chunk(2)
     output[0][0] -= to_add[0].permute(0, 3, 1, 2).to(output[0].device)[0]
@@ -67,7 +67,7 @@ def add_feature_on_area_base_cond(sae, feature_idx, activation_map, module, inpu
     mask = torch.zeros_like(activated, device=diff_cond.device)
     if len(activation_map) == 2:
         activation_map = activation_map.unsqueeze(0)
-    mask[..., feature_idx] = mask[..., feature_idx] = activation_map.to(mask.device)
+    mask[..., feature_idx] = activation_map.to(mask.device)
     to_add = mask @ sae.decoder.weight.T
     output[0][1] += to_add.permute(0, 3, 1, 2).to(output[0].device)[0]
     return output
@@ -93,7 +93,7 @@ def add_feature_on_area_turbo(sae, feature_idx, activation_map, module, input, o
     mask = torch.zeros_like(activated, device=diff.device)
     if len(activation_map) == 2:
         activation_map = activation_map.unsqueeze(0)
-    mask[..., feature_idx] = mask[..., feature_idx] = activation_map.to(mask.device)
+    mask[..., feature_idx] = activation_map.to(mask.device)
     to_add = mask @ sae.decoder.weight.T
     return (output[0] + to_add.permute(0, 3, 1, 2).to(output[0].device),)
 
