@@ -28,8 +28,11 @@ class ModelActivationCache(ABC):
         lines = [f"{self.__class__.__name__}:"]
         for attr_name, value in self.__dict__.items():
             if isinstance(value, list) and all(isinstance(v, torch.Tensor) for v in value):
-                shapes = value[0].shape
-                lines.append(f"  {attr_name}: len={len(value)}, shapes={shapes}")
+                if len(value) > 0:
+                    shapes = value[0].shape
+                    lines.append(f"  {attr_name}: len={len(value)}, shapes={shapes}")
+                else:
+                    lines.append(f"  {attr_name}: len={len(value)}")
             else:
                 lines.append(f"  {attr_name}: {type(value)}")
         return "\n".join(lines)
