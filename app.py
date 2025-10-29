@@ -13,82 +13,14 @@ from PIL import Image
 from SDLens import HookedStableDiffusionXLPipeline, CachedPipeline as CachedFLuxPipeline
 from SDLens.cache_and_edit.flux_pipeline import EditedFluxPipeline
 from SAE import SparseAutoencoder
-from utils import TimedHook, add_feature_on_area_base, replace_with_feature_base, add_feature_on_area_turbo, replace_with_feature_turbo, add_feature_on_area_flux
+from hooks import TimedHook
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import threading
-from einops import rearrange
 # from retrieval import FeatureRetriever
 
-
-code_to_block_sd = {
-    "down.2.1": "unet.down_blocks.2.attentions.1",
-    "mid.0": "unet.mid_block.attentions.0",
-    "up.0.1": "unet.up_blocks.0.attentions.1",
-    "up.0.0": "unet.up_blocks.0.attentions.0"
-}
-code_to_block_flux = {"18": "transformer.transformer_blocks.18"}
-
-FLUX_NAMES = ["black-forest-labs/FLUX.1-schnell", "black-forest-labs/FLUX.1-dev"]
-MODELS_CONFIG = {
-    "stabilityai/stable-diffusion-xl-base-1.0": {
-        "steps": 25,
-        "guidance_scale": 8.0,
-        "choices": ["up.0.1 (style)", "down.2.1 (composition)", "up.0.0 (details)", "mid.0"],
-        "value": "down.2.1 (composition)",
-        "code_to_block": code_to_block_sd,
-        "max_steps": 50,
-        "is_flux": False,
-        "downsample_factor": 16,
-        "add_feature_on_area": add_feature_on_area_base,
-        "num_features": 5120,
-
-    },
-    "stabilityai/sdxl-turbo": {
-        "steps": 1,
-        "guidance_scale": 0.0,
-        "choices": ["up.0.1 (style)", "down.2.1 (composition)", "up.0.0 (details)", "mid.0"],
-        "value": "down.2.1 (composition)",
-        "code_to_block": code_to_block_sd,
-        "max_steps": 4,
-        "is_flux": False,
-        "downsample_factor": 32,
-        "add_feature_on_area": add_feature_on_area_turbo,
-        "num_features": 5120,
-    },
-    "black-forest-labs/FLUX.1-schnell": {
-        "steps": 1,
-        "guidance_scale": 0.0,
-        "choices": ["18"],
-        "value": "18",
-        "code_to_block": code_to_block_flux,
-        "max_steps": 4,
-        "is_flux": True,
-        "exclude_list": [2462, 2974, 1577, 786, 3188, 9986, 4693, 8472, 8248, 325, 9596, 2813, 10803, 11773, 11410, 1067, 2965, 10488, 4537, 2102],
-        "downsample_factor": 8,
-        "add_feature_on_area": add_feature_on_area_flux,
-        "num_features": 12288
-
-    },
-
-    "black-forest-labs/FLUX.1-dev": {
-        "steps": 25,
-        "guidance_scale": 0.0,
-        "choices": ["18"],
-        "value": "18",
-        "code_to_block": code_to_block_flux,
-        "max_steps": 50,
-        "is_flux": True,
-        "exclude_list": [2462, 2974, 1577, 786, 3188, 9986, 4693, 8472, 8248, 325, 9596, 2813, 10803, 11773, 11410, 1067, 2965, 10488, 4537, 2102],
-        "downsample_factor": 8,
-        "add_feature_on_area": add_feature_on_area_flux,
-        "num_features": 12288
-
-    }
-}
-
-
+from model_interfaces import MODEL_SPECS, create_model_adapter
 
 
 lock = threading.Lock()
@@ -97,58 +29,16 @@ lock = threading.Lock()
 
 
 
-def process_cache(cache, saes_dict, model_config, timestep=None):
-
-    top_features_dict = {}
-    sparse_maps_dict = {}
-
-    for code in model_config['code_to_block'].keys():
-        block = model_config["code_to_block"][code]
-        sae = saes_dict[code]
+def process_cache(adapter, cache, saes_dict, timestep=None):
+    return adapter.process_cache(cache, saes_dict, timestep)
 
 
-        if model_config["is_flux"]:
-
-            with torch.no_grad():
-                features = sae.encode(torch.stack(cache.image_activation))  # shape: [timestep, batch, seq_len, num_features]
-                features[..., model_config["exclude_list"]] = 0
-
-            if timestep is not None and timestep < features.shape[0]:
-                features = features[timestep:timestep+1]
-
-            # I want to get [batch, timestep, 64, 64, num_features]
-            sparse_maps = rearrange(features, "t b (w h) n -> b t w h n", w=64, h=64).squeeze(0).squeeze(0)
-                
-        else:
-
-            diff = cache["output"][block] - cache["input"][block]
-            if diff.shape[0] == 2: # guidance is on and we need to select the second output
-                diff = diff[1].unsqueeze(0)
-
-            # If a specific timestep is provided, select that timestep from the cached activations
-            if timestep is not None and timestep < diff.shape[1]:
-                diff = diff[:, timestep:timestep+1]
-            
-            diff = diff.permute(0, 1, 3, 4, 2).squeeze(0).squeeze(0)
-            with torch.no_grad():
-                sparse_maps = sae.encode(diff)
-                
-        averages = torch.mean(sparse_maps, dim=(0, 1))
-
-        top_features = torch.topk(averages, 10).indices
-
-        top_features_dict[code] = top_features.cpu().tolist()
-        sparse_maps_dict[code] = sparse_maps.cpu().numpy()
-
-    return top_features_dict, sparse_maps_dict
-
-
-def plot_image_heatmap(cache, block_select, radio, model_config):
+def plot_image_heatmap(adapter, cache, block_select, radio):
     code = block_select.split()[0]
     feature = int(radio)
     
     heatmap = cache["heatmaps"][code][:, :, feature]
-    scaling_factor = 16 if model_config["is_flux"] else 32
+    scaling_factor = adapter.heatmap_scale
     heatmap = np.kron(heatmap, np.ones((scaling_factor, scaling_factor)))
     image = cache["image"].convert("RGBA")
     
@@ -165,16 +55,15 @@ def plot_image_heatmap(cache, block_select, radio, model_config):
     return heatmap_with_transparency
 
 
-def create_prompt_part(pipe, saes_dict, demo):
+def create_prompt_part(adapter, saes_dict, demo):
+    spec = adapter.spec
 
-    model_config = MODELS_CONFIG[pipe.pipe.name_or_path]
-        
     def image_gen(prompt, timestep=None, num_steps=None, guidance_scale=None):
         lock.acquire()
         try:
             # Default values
-            default_n_steps = model_config["steps"]
-            default_guidance = model_config["guidance_scale"]
+            default_n_steps = spec.steps
+            default_guidance = spec.guidance_scale
             
             # Use provided values if available, otherwise use defaults
             n_steps = default_n_steps if num_steps is None else int(num_steps)
@@ -183,35 +72,19 @@ def create_prompt_part(pipe, saes_dict, demo):
             # Convert timestep to integer if it's not None
             timestep_int = None if timestep is None else int(timestep)
             
-            if "FLUX" in pipe.pipe.name_or_path:
-                images = pipe.run(
-                    prompt, 
-                    num_inference_steps=n_steps,
-                    width=1024,
-                    height=1024,
-                    cache_activations=True,
-                    guidance_scale=guidance,
-                    positions_to_cache = list(model_config["code_to_block"].values()),
-                    inverse=False,
-                )
-                cache = pipe.activation_cache
-            
-            else:
-                images, cache = pipe.run_with_cache(
-                    prompt,
-                    positions_to_cache=list(model_config["code_to_block"].values()),
-                    num_inference_steps=n_steps,
-                    generator=torch.Generator(device="cpu").manual_seed(42),
-                    guidance_scale=guidance,
-                    save_input=True,
-                    save_output=True
-                )
+            image, cache = adapter.generate_with_cache(
+                prompt,
+                n_steps,
+                guidance,
+                positions_to_cache=list(spec.code_to_block.values()),
+                seed=42,
+            )
         finally:
             lock.release()
         
-        top_features_dict, top_sparse_maps_dict = process_cache(cache, saes_dict, model_config, timestep_int)
-        return images.images[0], {
-            "image": images.images[0],
+        top_features_dict, top_sparse_maps_dict = process_cache(adapter, cache, saes_dict, timestep_int)
+        return image, {
+            "image": image,
             "heatmaps": top_sparse_maps_dict,
             "features": top_features_dict
         }
@@ -221,7 +94,7 @@ def create_prompt_part(pipe, saes_dict, demo):
         return gr.update(choices=cache["features"][code])
 
     def update_img(cache, block_select, radio):
-        new_img = plot_image_heatmap(cache, block_select, radio, model_config)
+        new_img = plot_image_heatmap(adapter, cache, block_select, radio)
         return new_img
 
     with gr.Tab("Explore", elem_classes="tabs") as explore_tab:
@@ -241,8 +114,8 @@ def create_prompt_part(pipe, saes_dict, demo):
             
             with gr.Column(scale=4):
                 block_select = gr.Dropdown(
-                    choices=model_config["choices"], # replace this for flux
-                    value=model_config["value"],
+                    choices=spec.choices,
+                    value=spec.default_choice,
                     label="Select block", 
                     elem_id="block_select",
                     interactive=True
@@ -251,8 +124,8 @@ def create_prompt_part(pipe, saes_dict, demo):
                 with gr.Group() as sdxl_base_controls:
                     steps_slider = gr.Slider(
                         minimum=1,
-                        maximum=model_config["max_steps"],
-                        value= model_config["steps"],
+                        maximum=spec.max_steps,
+                        value=spec.steps,
                         step=1,
                         label="Number of steps",
                         elem_id="steps_slider",
@@ -264,7 +137,7 @@ def create_prompt_part(pipe, saes_dict, demo):
                     # TODO: check this 
                     timestep_selector = gr.Slider(
                         minimum=0,
-                        maximum=model_config["max_steps"]-1,
+                        maximum=spec.max_steps-1,
                         value=None,
                         step=1,
                         label="Timestep (leave empty for average across all steps)",
@@ -295,44 +168,31 @@ def downsample_mask(image, factor):
     downsampled = downsampled.mean(axis=(1, 3))
     return downsampled
 
-def create_intervene_part(pipe: HookedStableDiffusionXLPipeline, saes_dict, means_dict, demo):
-    model_config = MODELS_CONFIG[pipe.pipe.name_or_path]
+def create_intervene_part(adapter, saes_dict, means_dict, demo):
+    spec = adapter.spec
 
     def image_gen(prompt, num_steps, guidance_scale=None):
         lock.acquire()
-        guidance = model_config["guidance_scale"] if guidance_scale is None else float(guidance_scale)
+        guidance = spec.guidance_scale if guidance_scale is None else float(guidance_scale)
         try:
-
-            if "FLUX" in pipe.pipe.name_or_path:
-                images = pipe.run(
-                    prompt, 
-                    num_inference_steps=int(num_steps),
-                    width=1024,
-                    height=1024,
-                    cache_activations=False,
-                    guidance_scale=guidance,
-                    inverse=False,
-                )
-            else:
-                images = pipe.run_with_hooks(
-                    prompt,
-                    position_hook_dict={},
-                    num_inference_steps=int(num_steps),
-                    generator=torch.Generator(device="cpu").manual_seed(42),
-                    guidance_scale=guidance,
-                )
+            image = adapter.generate_image(
+                prompt,
+                int(num_steps),
+                guidance,
+                seed=42,
+            )
         finally:
             lock.release()
-        if images.images[0].size == (1024, 1024):
-            return images.images[0].resize((512, 512))
-        else:
-            return images.images[0]
+        if image.size == (1024, 1024):
+            return image.resize((512, 512))
+        return image
 
     def image_mod(prompt, block_str, brush_index, strength, num_steps, input_image, guidance_scale=None, start_index=None, end_index=None):
         block = block_str.split(" ")[0]
+        brush_index = int(brush_index)
 
         mask = (input_image["layers"][0] > 0)[:, :, -1].astype(float)
-        mask = downsample_mask(mask, model_config["downsample_factor"])
+        mask = downsample_mask(mask, spec.downsample_factor)
         mask = torch.tensor(mask, dtype=torch.float32, device="cuda")
 
         if mask.sum() == 0:
@@ -355,7 +215,7 @@ def create_intervene_part(pipe: HookedStableDiffusionXLPipeline, saes_dict, mean
 
 
         def myhook(module, input, output):
-            return model_config["add_feature_on_area"](
+            return spec.add_feature_on_area(
                 saes_dict[block],
                 brush_index,
                 mask * means_dict[block][brush_index] * strength,
@@ -365,65 +225,53 @@ def create_intervene_part(pipe: HookedStableDiffusionXLPipeline, saes_dict, mean
         hook = TimedHook(myhook, int(num_steps), np.arange(start_index, end_index))
 
         lock.acquire()
-        guidance = model_config["guidance_scale"] if guidance_scale is None else float(guidance_scale)
+        guidance = spec.guidance_scale if guidance_scale is None else float(guidance_scale)
         
         try:
-
-            if model_config["is_flux"]:
-                 image = pipe.run_with_edit(
-                    prompt,
-                    seed=42,
-                    num_inference_steps=int(num_steps),
-                    edit_fn= lambda input, output: hook(None, input, output),
-                    layers_for_edit_fn=[i for i in range(18, 57)],
-                    stream="image").images[0]
-            else:
-
-                image = pipe.run_with_hooks(
-                    prompt,
-                    position_hook_dict={model_config["code_to_block"][block]: hook},
-                    num_inference_steps=int(num_steps),
-                    generator=torch.Generator(device="cpu").manual_seed(42),
-                    guidance_scale=guidance
-                ).images[0]
+            image = adapter.apply_edit(
+                prompt,
+                block,
+                hook,
+                int(num_steps),
+                guidance,
+                seed=42,
+            )
         finally:
             lock.release()
         return image
 
     def feature_icon(block_str, brush_index, guidance_scale=None):
+        brush_index = int(brush_index)
         block = block_str.split(" ")[0]
         if block in ["mid.0", "up.0.0"]:
             gr.Info("Note that Feature Icon works best with down.2.1 and up.0.1 blocks but feel free to explore", duration=3)
 
+        hook_fn = spec.feature_icon_hook
+        if hook_fn is None:
+            gr.Info("Feature Icon is not supported for this model.", duration=3)
+            return None
+
         def hook(module, input, output):
-            if is_base_model:
-                return replace_with_feature_base(
-                    saes_dict[block],
-                    brush_index,
-                    means_dict[block][brush_index] * saes_dict[block].k,
-                    module,
-                    input,
-                    output
-                )
-            else:
-                return replace_with_feature_turbo(
-                    saes_dict[block],
-                    brush_index,
-                    means_dict[block][brush_index] * saes_dict[block].k,
-                    module,
-                    input,
-                    output)
+            return hook_fn(
+                saes_dict[block],
+                brush_index,
+                means_dict[block][brush_index] * saes_dict[block].k,
+                module,
+                input,
+                output
+            )
         lock.acquire()
-        guidance = model_config["guidance_scale"] if guidance_scale is None else float(guidance_scale)
+        guidance = spec.guidance_scale if guidance_scale is None else float(guidance_scale)
         
         try:
-            image = pipe.run_with_hooks(
+            image = adapter.apply_edit(
                 "",
-                position_hook_dict={model_config["code_to_block"][block]: hook},
-                num_inference_steps=model_config["steps"],
-                generator=torch.Generator(device="cpu").manual_seed(42),
-                guidance_scale=guidance,
-            ).images[0]
+                block,
+                hook,
+                spec.steps,
+                guidance,
+                seed=42,
+            )
         finally:
             lock.release()
         return image
@@ -438,7 +286,7 @@ def create_intervene_part(pipe: HookedStableDiffusionXLPipeline, saes_dict, mean
                     prompt_field = gr.Textbox(lines=1, label="Enter prompt here", value="A dog plays with a ball, cartoon", elem_id="prompt_input")                    
                     
                 with gr.Row():
-                    num_steps = gr.Number(value=model_config["steps"], label="Number of steps", minimum=1, maximum=model_config["max_steps"], elem_id="num_steps", precision=0)
+                    num_steps = gr.Number(value=spec.steps, label="Number of steps", minimum=1, maximum=spec.max_steps, elem_id="num_steps", precision=0)
                     
                 with gr.Row():
                     # Generate button
@@ -450,19 +298,19 @@ def create_intervene_part(pipe: HookedStableDiffusionXLPipeline, saes_dict, mean
                     with gr.Column(scale=7):
                         with gr.Row():
                             block_select = gr.Dropdown(
-                                choices=model_config["choices"], 
-                                value=model_config["value"],
+                                choices=spec.choices, 
+                                value=spec.default_choice,
                                 label="Select block", 
                                 elem_id="block_select"
                             )
-                            brush_index = gr.Number(value=0, label="Brush index", minimum=0, maximum=model_config["num_features"]-1, elem_id="brush_index", precision=0)
+                            brush_index = gr.Number(value=0, label="Brush index", minimum=0, maximum=spec.num_features-1, elem_id="brush_index", precision=0)
                         # with gr.Row():
                         #     button_icon = gr.Button('Feature Icon', elem_id="feature_icon_button")
                         with gr.Row():
                             gr.Markdown("**TimedHook Range** (which steps to apply the feature)", visible=True)
                         with gr.Row():
-                            start_index = gr.Number(value=0, label="Start index", minimum=0, maximum=model_config["max_steps"], elem_id="start_index", precision=0, visible=True)
-                            end_index = gr.Number(value=model_config["steps"], label="End index", minimum=0, maximum=model_config["max_steps"], elem_id="end_index", precision=0, visible=True)
+                            start_index = gr.Number(value=0, label="Start index", minimum=0, maximum=spec.max_steps, elem_id="start_index", precision=0, visible=True)
+                            end_index = gr.Number(value=spec.steps, label="End index", minimum=0, maximum=spec.max_steps, elem_id="end_index", precision=0, visible=True)
                     with gr.Column(scale=3):
                         with gr.Row():
                             strength = gr.Number(value=10, label="Strength", minimum=-40, maximum=40, elem_id="strength", precision=2)
@@ -505,35 +353,22 @@ def create_intervene_part(pipe: HookedStableDiffusionXLPipeline, saes_dict, mean
 
 
 
-def create_top_images_part(demo, pipe):
+def create_top_images_part(demo, adapter):
+    spec = adapter.spec
 
-    model_config = MODELS_CONFIG[pipe.pipe.name_or_path]
-    
-    if isinstance(pipe, HookedStableDiffusionXLPipeline):
-        is_flux = False
-    elif isinstance(pipe, CachedFLuxPipeline):
-        is_flux = True
-    else:
-        raise AssertionError(f"Unknown pipe class: {type(pipe)}")
-    
     def update_top_images(block_select, brush_index):
         block = block_select.split(" ")[0]
-                    # Define path for fetching image
-        if is_flux:
-            part = 1 if brush_index <= 7000 else 2
-            url = f"https://huggingface.co/datasets/antoniomari/flux_sae_images/resolve/main/{block}/part{part}/{brush_index}.jpg"
-        else:
-            url = f"https://huggingface.co/surokpro2/sdxl_sae_images/resolve/main/{block}/{brush_index}.jpg"
-        return url
+        index = int(brush_index)
+        return adapter.top_image_url(block, index)
 
     with gr.Tab("Top Images", elem_classes="tabs") as top_images_tab:
         with gr.Row():
             block_select = gr.Dropdown(
-                choices=["flux_18"] if is_flux else ["up.0.1 (style)", "down.2.1 (composition)", "up.0.0 (details)", "mid.0"], 
-                value="flux_18" if is_flux else "down.2.1 (composition)",
+                choices=spec.choices,
+                value=spec.default_choice,
                 label="Select block"
             )
-            brush_index = gr.Number(value=0, label="Brush index", minimum=0, maximum=model_config["num_features"]-1, precision=0)
+            brush_index = gr.Number(value=0, label="Brush index", minimum=0, maximum=spec.num_features-1, precision=0)
         with gr.Row():
             image = gr.Image(width=600, height=600, label="Top Images")
 
@@ -543,31 +378,16 @@ def create_top_images_part(demo, pipe):
     return top_images_tab
 
 
-def create_top_images_plus_search_part(retriever, demo, pipe):
-
-    model_config = MODELS_CONFIG[pipe.pipe.name_or_path]
-
-    
-
-    if isinstance(pipe, HookedStableDiffusionXLPipeline):
-        is_flux = False
-    elif isinstance(pipe, CachedFLuxPipeline):
-        is_flux = True
-    else:
-        raise AssertionError(f"Unknown pipe class: {type(pipe)}")
+def create_top_images_plus_search_part(retriever, demo, adapter):
+    spec = adapter.spec
 
     def update_cache(block_select, search_by_text, search_by_index):
         if search_by_text == "":
             top_indices = []
-            index = search_by_index
+            index = int(search_by_index)
             block = block_select.split(" ")[0]
 
-            # Define path for fetching image
-            if is_flux:
-                part = 1 if index <= 7000 else 2
-                url = f"https://huggingface.co/antoniomari/flux_sae_images/resolve/main/{block}/part{part}/{index}.jpg"
-            else:
-                url = f"https://huggingface.co/surokpro2/sdxl_sae_images/resolve/main/{block}/{index}.jpg"
+            url = adapter.top_image_url(block, index)
             return url, {"image": url, "feature_idx": index, "features": top_indices}
         else:
             # TODO
@@ -581,7 +401,7 @@ def create_top_images_plus_search_part(retriever, demo, pipe):
             block = block_select.split(" ")[0]
             top_indices = list(map(int, top_indices))
             index = top_indices[0]
-            url = f"https://huggingface.co/surokpro2/sdxl_sae_images/resolve/main/{block}/{index}.jpg"
+            url = adapter.top_image_url(block, index)
             return url, {"image": url, "feature_idx": index, "features": top_indices[:20]}
 
     def update_radio(cache):
@@ -589,8 +409,7 @@ def create_top_images_plus_search_part(retriever, demo, pipe):
 
     def update_img(cache, block_select, index):
         block = block_select.split(" ")[0]
-        url = f"https://huggingface.co/surokpro2/sdxl_sae_images/resolve/main/{block}/{index}.jpg"
-        return url
+        return adapter.top_image_url(block, int(index))
 
     with gr.Tab("Top Images", elem_classes="tabs") as explore_tab:
         cache = gr.State(value={
@@ -606,13 +425,13 @@ def create_top_images_plus_search_part(retriever, demo, pipe):
             
             with gr.Column(scale=4):
                 block_select = gr.Dropdown(
-                    choices=["flux_18"] if is_flux else ["up.0.1 (style)", "down.2.1 (composition)", "up.0.0 (details)", "mid.0"], 
-                    value="flux_18" if is_flux else "down.2.1 (composition)",
+                    choices=spec.choices, 
+                    value=spec.default_choice,
                     label="Select block", 
                     elem_id="block_select",
                     interactive=True
                 )
-                search_by_index = gr.Number(value=0, label="Search by index", minimum=0, maximum=model_config["num_features"]-1, precision=0)
+                search_by_index = gr.Number(value=0, label="Search by index", minimum=0, maximum=spec.num_features-1, precision=0)
                 search_by_text = gr.Textbox(lines=1, label="Search by text", value="", visible=False)
                 radio = gr.Radio(choices=[], label="Select a feature", interactive=True, visible=False)
         
@@ -667,6 +486,7 @@ def create_intro_part():
 
 
 def create_demo(pipe, saes_dict, means_dict, use_retrieval=True):
+    adapter = create_model_adapter(pipe)
     custom_css = """
     .tabs button {
         font-size: 20px !important; /* Adjust font size for tab text */
@@ -687,11 +507,11 @@ def create_demo(pipe, saes_dict, means_dict, use_retrieval=True):
     with gr.Blocks(css=custom_css) as demo:
         # with create_intro_part():
         #     pass
-        with create_prompt_part(pipe, saes_dict, demo):
+        with create_prompt_part(adapter, saes_dict, demo):
             pass
-        with create_top_images_part(demo, pipe):
+        with create_top_images_part(demo, adapter):
             pass
-        with create_intervene_part(pipe, saes_dict, means_dict, demo):
+        with create_intervene_part(adapter, saes_dict, means_dict, demo):
             pass
         
     return demo
@@ -723,7 +543,7 @@ if __name__ == "__main__":
 
     # Command-line arguments
     block_code = "18"
-    block_name = code_to_block_flux[block_code]
+    block_name = MODEL_SPECS["black-forest-labs/FLUX.1-schnell"].code_to_block[block_code]
 
     saes_dict = {}
     means_dict = {}
