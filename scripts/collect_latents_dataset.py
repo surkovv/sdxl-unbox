@@ -3,7 +3,7 @@ import io
 import json
 import os
 import sys
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 import torch
@@ -12,7 +12,7 @@ from datasets import load_dataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from model_interfaces import MODEL_SPECS, create_model_adapter  # noqa: E402
 from utils.loaders import load_pipeline, resolve_dtype  # noqa: E402
@@ -51,14 +51,17 @@ def _collect_sdxl_tensors(cache: Dict[str, Dict[str, torch.Tensor]], module_path
     }
 
 
-def _collect_flux_tensors(cache, include_text_stream: bool = True) -> Dict[str, bytes]:
+def _collect_flux_tensors(
+    image_activations: List[torch.Tensor],
+    text_activations: List[torch.Tensor],
+) -> Dict[str, bytes]:
     tensors = {}
-    if getattr(cache, "image_activation", None):
-        image_activation = torch.stack(cache.image_activation)
-        tensors["image_activation.pth"] = _serialize_tensor(image_activation)
-    if include_text_stream and getattr(cache, "text_activation", None):
-        text_activation = torch.stack(cache.text_activation)
-        tensors["text_activation.pth"] = _serialize_tensor(text_activation)
+    if image_activations:
+        stacked = torch.cat([t.detach().cpu() for t in image_activations], dim=1)
+        tensors["image_activation.pth"] = _serialize_tensor(stacked)
+    if text_activations:
+        stacked = torch.cat([t.detach().cpu() for t in text_activations], dim=1)
+        tensors["text_activation.pth"] = _serialize_tensor(stacked)
     return tensors
 
 
@@ -108,10 +111,11 @@ def main(
         if batch_index >= finish_at:
             break
 
-        prompts = batch["caption"]
+        prompts = list(batch["caption"])
         batch_size = len(prompts)
         if batch_size == 0:
             continue
+        seed_values = [batch_index * dataset_batch_size + i for i in range(batch_size)]
 
         kwargs_to_save = {
             "prompt": prompts,
@@ -119,26 +123,41 @@ def main(
             "num_inference_steps": steps,
             "guidance_scale": guidance,
             "seed": batch_index,
+            "seed_per_sample": seed_values,
             "model_id": model_id,
         }
 
         if model_id.startswith("black-forest-labs/FLUX"):
-            output = pipe.run(
-                prompts,
-                num_inference_steps=steps,
-                width=1024,
-                height=1024,
-                cache_activations=True,
-                guidance_scale=guidance,
-                positions_to_cache=positions_to_cache,
-                inverse=False,
-                seed=batch_index,
-            )
-            cache = pipe.activation_cache
+            flux_images = []
+            flux_image_activations: List[torch.Tensor] = []
+            flux_text_activations: List[torch.Tensor] = []
+
+            for sample_seed, prompt in zip(seed_values, prompts):
+                output = pipe.run(
+                    prompt,
+                    num_inference_steps=steps,
+                    width=1024,
+                    height=1024,
+                    cache_activations=True,
+                    guidance_scale=guidance,
+                    positions_to_cache=positions_to_cache,
+                    inverse=False,
+                    seed=sample_seed,
+                )
+                cache = pipe.activation_cache
+                flux_images.append(np.array(output.images[0]))
+
+                if getattr(cache, "image_activation", None):
+                    flux_image_activations.append(torch.stack(cache.image_activation))
+                if getattr(cache, "text_activation", None):
+                    flux_text_activations.append(torch.stack(cache.text_activation))
+
+            image_array = np.stack(flux_images)
+            flux_payload = _collect_flux_tensors(flux_image_activations, flux_text_activations)
         else:
             generators = [
-                torch.Generator(device="cpu").manual_seed(batch_index * dataset_batch_size + i)
-                for i in range(batch_size)
+                torch.Generator(device="cpu").manual_seed(seed_value)
+                for seed_value in seed_values
             ]
             output, cache = pipe.run_with_cache(
                 prompts,
@@ -149,9 +168,9 @@ def main(
                 save_input=True,
                 save_output=True,
             )
+            image_array = np.stack([np.array(image) for image in output.images])
 
         sample_key = f"sample_{batch_index}"
-        image_array = np.stack([np.array(image) for image in output.images])
         image_writer.write(
             {
                 "__key__": sample_key,
@@ -162,7 +181,7 @@ def main(
 
         for block_code, module_path in block_map.items():
             if model_id.startswith("black-forest-labs/FLUX"):
-                tensor_payloads = _collect_flux_tensors(cache)
+                tensor_payloads = flux_payload
             else:
                 tensor_payloads = _collect_sdxl_tensors(cache, module_path)
 

@@ -3,11 +3,6 @@ import json
 import gradio as gr
 import os
 
-# environment
-os.environ['HF_HOME'] = '/dlabscratch1/anmari'
-os.environ['TRANSFORMERS_CACHE'] = '/dlabscratch1/anmari'
-os.environ['HF_DATASETS_CACHE'] = '/dlabscratch1/anmari'
-# os.environ["HF_TOKEN"] = ""
 import torch
 from PIL import Image
 from SDLens import HookedStableDiffusionXLPipeline, CachedPipeline as CachedFLuxPipeline
