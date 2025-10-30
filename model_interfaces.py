@@ -133,11 +133,12 @@ class SDXLAdapter(ModelAdapter):
             if timestep is not None and timestep < diff.shape[1]:
                 diff = diff[:, timestep : timestep + 1]
 
-            diff = diff.permute(0, 1, 3, 4, 2).squeeze(0).squeeze(0)
+            diff = diff.permute(0, 1, 3, 4, 2).squeeze(0)
             with torch.no_grad():
                 sparse_maps = sae.encode(diff)
 
-            averages = torch.mean(sparse_maps, dim=(0, 1))
+            flat_maps = sparse_maps.reshape(-1, sparse_maps.shape[-1])
+            averages = torch.mean(flat_maps, dim=0)
             top_features = torch.topk(averages, 10).indices
 
             top_features_dict[code] = top_features.cpu().tolist()
@@ -229,8 +230,9 @@ class FluxAdapter(ModelAdapter):
             if timestep is not None and timestep < features.shape[0]:
                 features = features[timestep : timestep + 1]
 
-            sparse_maps = rearrange(features, "t b (w h) n -> b t w h n", w=64, h=64).squeeze(0).squeeze(0)
-            averages = torch.mean(sparse_maps, dim=(0, 1))
+            sparse_maps = rearrange(features, "t b (w h) n -> b t w h n", w=64, h=64).squeeze(0)
+            flat_maps = sparse_maps.reshape(-1, sparse_maps.shape[-1])
+            averages = torch.mean(flat_maps, dim=0)
             top_features = torch.topk(averages, 10).indices
 
             top_features_dict[code] = top_features.cpu().tolist()
